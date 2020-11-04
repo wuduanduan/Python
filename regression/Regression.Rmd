@@ -1,0 +1,458 @@
+---
+title: "Data Analysis Project"
+author: "Ru, Paul"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+#
+1. Introduction
+###### 
+The project consists in predicting the price of a house. We are given two datasets, **train** and **test**, each containing 68 variables (quantitative and qualitative) describing the characteristics of the house. 
+We will try to use to a linear model to solve the problem and hence, in the first step, we will select a few variables using standard techniques such as forward/backward selection and Lasso, but we will also be considering a transformation of the dependent variable SalePrice. To verify the precision of our models, we will analyze the __Diagnostic Plots__ and will compare the performances. 
+The hypothesis that we propose is that the logarithm of the dependent variable strongly depends on the numerical ones and some few categorical ones. 
+
+```{r, message = FALSE, include = FALSE}
+# We add the main libraries 
+library(knitr)
+library(rmarkdown)
+library(ggplot2)
+library(plyr)
+library(dplyr)
+library(corrplot)
+library(scales)
+library(faraway)
+library(caret)
+library(MASS)
+library(Metrics)
+```
+
+
+
+```{r global_options, include=FALSE} 
+# format 
+knitr::opts_chunk$set(fig.path = 'Figs/', echo = FALSE, warning = FALSE, message = FALSE, results = 'hide')
+```
+
+
+#2. Exploratory Data Analysis
+
+###### 
+First, we print the summary of the training set to remark some general properties. 
+```{r, message = FALSE}
+load(file = 'DataProject.RData')
+summary(train)
+```
+We notice that all the variables are normalized in the interval [-1, 1], which is what we expected from the dataset since we are starting with the file DataProject.RData.  
+
+Naturally, we would like to find the most correlated variables with the target variable SalePrice. Since there are some categorical (qualitative) variables, we will ignore them in this first introductory analysis. 
+
+```{r, message = FALSE, fig.width= 5, fig.height= 5}
+# numericVars will contain only numerical variables (we ignore the categorical ones)
+numericVars <- which(sapply(train, is.numeric))
+numericVarNames <- names(numericVars) # Name of the numeric varibales
+cat('There are', length(numericVars), 'numeric variables') 
+train_numVar <- train[, numericVars] # We take the subset composed of the numeric variables
+cor_numVar <- cor(train_numVar, use = 'pairwise.complete.obs') # Correlation of the numerical variables 
+cor_sorted <- as.matrix(sort(cor_numVar[,'SalePrice'], decreasing = TRUE)) # We sort the values with respect to the correlation with SalePrice
+
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x) > 0.5))) # Consider only the significative correlations (greater than 0.5) 
+cor_numVar <- cor_numVar[CorHigh, CorHigh]
+
+
+corrplot.mixed(cor_numVar, tl.col = "black", tl.pos = "lt", number.cex = 0.4)
+```
+
+We find 29 numerical variables and we notice that some of the most correlated variables are OverallQual, GrLivArea, GarageCars, GarageArea. Naturally, most of these variables will be also found in the next sections when we use forward/bacward selection or Lasso to select the variables for our linear model.  
+
+Similarly, we find some very intuitive results such as the correlation of GarageCars and GarageArea, 0.89, since both are just two different ways to measure the same area (in cars and square feet). 
+It is the same case for YearBuilt and GarageYrBuilt, the correlation in this case is 0.82. The explanation is also intutitive, when we build a garage for a house, we usually do it at the same time (the same year) than the house itself. 
+
+Finally, we plot the target variable SalePrice and notice that they are skewed. It is what leads to think that a transformation of the variable is necessary to make it more symmetrical and hence appropriate for a linear regression model.
+
+```{r, message = FALSE, fig.width= 3, fig.height= 3}
+# Function to compute the R2 
+rsq <- function(x, y) 
+summary(lm(y~x))$r.squared 
+# End of the function
+
+all <- rbind(train, test) # The complete dataset
+# Plot of SalePrice values in the training set 
+df <- rbind(data.frame(version = "price", x = train$SalePrice))
+
+ggplot(data = df) + facet_wrap(~version, scales = "free_x") + geom_histogram(aes(x=x))
+
+```
+#3. Modeling and Diagnostics
+
+######  Given that at the beginning, we have both quantitative and qualitative variables, the first model will consist in taking only the quantitative variables which are easier to model (we already use this idea in the previous section to find some correlations between the explicative variables and SalePrice). 
+The following diagnostic graphs corresponds to the simple model with only numerical variables given by :
+
+fit <- lm(formula = SalePrice ~ ., data = train_numVar)
+
+```{r, message = FALSE}
+# Only with numerical variables 
+fit <- lm(formula = SalePrice ~ ., data = train_numVar) # First naive model 
+# summary(fit)
+# names(fit$model)
+initial_predictor <- predict(fit, new = test)
+par(mfrow= c(2,2))
+plot(fit) 
+rsq(initial_predictor, test$SalePrice)
+mse(initial_predictor, test$SalePrice)
+```
+We find the 29 numeric features which were also found before, but the Residuals vs Fitted graph is not accurate at all since the distance to the horizontal line $y = 0$ is very clear (it is of the order of $10^5$). This also suggests that we strongly need to use a transformation of SalePrice to reduce the current difference in the model. 
+At the same time, due to the 4th graph Residuals vs Leverage. we notice that 199 is an outlier. That's why we are going to remove it from the set train. 
+
+The first non trivial models are constructed using stepAIC (forward/backward selection) and we will consider the familiy of Box-Cox transformations for the target variable SalePrice. 
+Box-Cox family of transformations: 
+$$
+Y(\lambda)=
+\begin{cases}
+\frac{y^{\lambda} - 1}{\lambda}, \text{if } \lambda \neq 0\\
+\log(y), \text{if } \lambda = 0
+\end{cases}
+$$
+ 
+The following diagnostic graphs are of the model removed outlier(point 199), applied box-cox transformation to the SalePrice and a forward-backward selectionAIC:
+ 
+```{r, message = FALSE}
+# Seems that 199 is an outlier 
+newTrain <-train[-199,] # remove the outlier
+newtrain_numVar <- train_numVar[-199,] # remove the outlier from the numerical variables
+newfit <- lm(formula= SalePrice ~., data = newtrain_numVar) # new naive fit
+
+step_fwbw <- stepAIC(newfit, direction = "both") 
+#par(mfrow= c(2,2))
+#plot(step_fwbw) 
+
+# We use box-cox to center the values (given that log already seemed to do it pretty well)
+bc <- boxcox(step_fwbw, lambda = seq(-3, 3), plotit= FALSE, interp = FALSE)
+best.lambda = bc$x[which(bc$y == max(bc$y))]
+best.lambda # we obtain best.lambda = 0.03, and given that 0 is in the interval confidence of 95%, we take 0 instead
+
+fit_boxcox <- lm(log(SalePrice) ~ ., data = step_fwbw$model) # BoxCox function for lambda = 0
+par(mfrow= c(2,2))
+plot(fit_boxcox)
+both_predictor <- exp(predict(fit_boxcox, new = test)) # Real values, exponential of the predicted values
+
+rsq(both_predictor, test$SalePrice)
+mse(both_predictor, test$SalePrice)
+```
+
+As we can see, the results are quite good. The Residuals vs Fitted graph is precise enough (notice that the scales in Residulas are as small as 0.2). 
+The Q-Q Plot is also a line (not completely at the tails, but the main part is) and then it already suggest that indeed, the residuals are following a gaussian distribution. 
+The Scale-Location graph is probably the less acurate among the 4 graphs obtained, but anyway it's not very far from being a line (notice again the scale of Residuals)
+Finally, the residuals vs Leverage graph indicates, as expected, that now there are no outliers anymore. 
+
+Therefore, we can say that this first model (BoxCox + StepAIC) is accurate enough to measure it's performance with the test dataset and the value of $R^2$ is about 0.907, which is already pretty good. Unfortunately, the MSE (Mean Square Error) is still very high, it's about 7e8, this is due to the exponential function that must be propagated to the residuals too. 
+
+After considering the numeric variables only, we return back to the initial model and will consider again the categorical variables to find some improvement. We follow a similar procedure. 
+```{r, message = FALSE}
+library(MASS)
+# All the variables 
+fitall <- lm(formula = SalePrice ~., data = train) 
+# summary(fitall) 
+anova(fitall)
+```
+
+From the above table, some categorical variables are suggested by R:
+MSSubClass, Neighborhood, ExterQual, KitchenQual, RoofStyle, GarageType. 
+
+We also notice that sometimes several categorical variables are correlated, like GarageArea, GarageQual etc.
+```{r, message = FALSE}
+train$BsmtFinType2[0:5]
+```
+
+RandomForest algorithm is a powerful ensemble machine learning algorithm. RandomForest is a ensemble of many independent decision trees. While minimise the loss function, the desicion trees "learn" the best criterion to split the class. For instance, if there are 2 GarageArea, then the value will be larger than 22,000. For each decision tree, there will be several splits for a given observation. And the observation finally belongs to one leaf of the tree with a value. The final prediction value will be determined by all trees in the ensemble. 
+
+So we could use the RandomForest algorithm to do a first feature selection for us, just to see what kind of influence it will have in introducing the categorical variables. We do this in the whole dataset.
+
+RandomForest suggest the most important 20 variables as follows:
+
+```{r}
+library(randomForest)
+
+set.seed(2019)
+quick_RF <- randomForest(x=all[,-68], y=all$SalePrice, ntree=50,importance=TRUE)
+imp_RF <- importance(quick_RF) 
+imp_DF <- data.frame(Variables = row.names(imp_RF), MSE = imp_RF[,1])
+imp_DF <- imp_DF[order(imp_DF$MSE, decreasing = TRUE),]
+
+ggplot(imp_DF[1:20,], aes(x=reorder(Variables, MSE), y=MSE, fill=MSE)) + geom_bar(stat = 'identity') + labs(x = 'Variables', y= '% increase MSE if variable is randomly permuted') + coord_flip() + theme(legend.position="none")
+```
+
+
+Then, we select the variables both suggested by ANOVA and the random forest regressor, that's to say:
+Neighborhood, GarageType, ExterQual, RoofStyle. 
+
+Take a glimpse at these categorical features:
+
+```{r, fig.width= 5, fig.height= 5}
+library(gridExtra)
+# Graph of the 4 categorical variables choosen (Neihgborhood, GarageType, ExterQual, RoofStyle)
+p1 = ggplot(train[!is.na(train$SalePrice),], aes(x = reorder(Neighborhood, SalePrice, FUN = median), y = SalePrice)) + geom_bar(stat = 'summary', fun.y = 'median', fill = 'blue') + geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p2 = ggplot(train[!is.na(train$SalePrice),], aes(x = reorder(GarageType, SalePrice, FUN = median), y = SalePrice)) + geom_bar(stat = 'summary', fun.y = 'median', fill = 'blue') + geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p3 = ggplot(train[!is.na(train$SalePrice),], aes(x = reorder(ExterQual, SalePrice, FUN = median), y = SalePrice)) + geom_bar(stat = 'summary', fun.y = 'median', fill = 'blue') + geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p4 = ggplot(train[!is.na(train$SalePrice),], aes(x = reorder(RoofStyle, SalePrice, FUN = median), y = SalePrice)) + geom_bar(stat = 'summary', fun.y = 'median', fill = 'blue') + geom_label(stat = "count", aes(label = ..count.., y = ..count..), size=3) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+grid.arrange(p1, p2, p3, p4)
+```
+
+We do a regression only with the selected categorical variables. R knows transform the string to numerical variables. We find that only with these four categorical variables, we have a $R^2 = 0.70$, which can be interpreted by the existed of linearity: there are indeed useful informations in the categorical variables. 
+
+```{r}
+
+# plus the categorical variables:
+md = SalePrice ~ Neighborhood + GarageType + ExterQual + RoofStyle
+Newtrain <- rbind(train, test[132,]) # One point added to the training set to avoid "unknown" variable problem for the regressor in the test set
+Newtrain_numVar <- Newtrain[, numericVars] # numericVars in the new training set generated before
+fit_cat <- lm(md, data = Newtrain) # Initial naive model with only 4 categorical variables
+predict_cat <- predict(fit_cat, new = test)
+#plot(predict_cat)
+rsq(predict_cat, test$SalePrice)
+mse(predict_cat, test$SalePrice)
+# categorical residual is okay.
+```
+It is logic since the house price depends on many internal and external conditions. The internal conditions like the garage type and roof type (better design cost more); the external conditions like whether it finds itself in a nice resident area. We hope to have a better residual distribution in combaining numerical and categorical variables.
+
+In comparing with the case where on numerical variables are considered, we find that the residual graph is improved. Therefore we get the intuition that when more information is revealed, the residual is more randomly distributed around zero.
+```{r}
+# Only with numerical variables 
+fit <- lm(formula = SalePrice ~ ., data = Newtrain_numVar) 
+# summary(fit)
+initial_predictor <- predict(fit, new = test)
+
+# put both numerical and categorical together
+train_cat <- Newtrain[,c("Neighborhood", "GarageType", "ExterQual", "RoofStyle")]
+train_addup = cbind(Newtrain_numVar,train_cat)
+
+
+fit_addup <- lm(formula = SalePrice ~ ., data = train_addup) # Linear model with the numerical variables and the 4 categorical ones
+# summary(fit_addup)
+#par(mfrow= c(2,2))
+#plot(fit_addup) 
+predictor_addup <- predict(fit_addup, new = test)
+rsq(predictor_addup, test$SalePrice)
+mse(predictor_addup, test$SalePrice)
+
+```
+
+We also find that the point 199 seems to be an outlier, because it goes beyond the courbe of Cook's distance equals to 1/2. We will remove this point. 
+
+```{r}
+# There are 34 variables in the train set
+# 199 is again an outlier, we remove it
+newTrain <-train_addup[-199,]
+```
+
+As before, to refine the model, we use a forward selection to select pertinent variables.
+
+```{r}
+newfit <- lm(formula= SalePrice ~., data = newTrain)
+step_fwbw <- stepAIC(newfit, direction = "both")
+# summary(step_fwbw)
+#par(mfrow= c(2,2))
+#plot(step_fwbw)
+```
+We remark that categorical variables Neighborhood and ExterQual have significant influence and selected by forward and backward selection. Certains values like: NeighborhoodStoneBr, NeighborhoodNoRidge, ExterQualTA are important. GarageType have less but also important influence to SalePrice.
+
+
+In the new obtained model, we will also do box-cox transformation. We find the $\text{best } \lambda = 0.03$. However, for practical reasons, we will take $\lambda = 0$, which is still in the 95% confidence interval.
+
+```{r}
+# change of variable
+bc <- boxcox(step_fwbw, lambda = seq(-3, 3))
+best.lambda = bc$x[which(bc$y == max(bc$y))]
+best.lambda # best.lambda = 0.03, but we take lambda = 0 for practical reasons
+
+fit_boxcox <- lm(log(SalePrice) ~., data = step_fwbw$model)
+par(mfrow= c(2,2))
+plot(fit_boxcox)
+predict_bc <- exp(predict(fit_boxcox, new = test)) 
+rsq(predict_bc, test$SalePrice)
+mse(predict_bc, test$SalePrice)
+```
+
+We will do the same thing, but using the dummy variables for the 4 selected categorical variables. We have in total 29 numerical variables and 38 one-hot dummy variables.
+
+```{r}
+Cat_factors <- train[, (names(Newtrain) %in% names(train_cat))]
+Cat_factors <- Cat_factors[, names(Cat_factors) != 'SalePrice']
+Cat_dummies <- as.data.frame(model.matrix(~.-1, Cat_factors))
+Cat_dummies_train <- cbind(train_numVar, Cat_dummies)
+names(Cat_dummies_train)
+Cat_dummies_train
+```
+
+```{r}
+# We prepare the test set for cross validation (we add th dummy variables)
+Cat_factors_test <- test[, (names(Newtrain) %in% names(train_cat))]
+#Cat_factors_test <- Cat_factors_test[, names(Cat_factors_test) != 'SalePrice']
+
+Cat_dummies_test <- as.data.frame(model.matrix(~.-1, Cat_factors_test))
+Cat_test_dummy = cbind(test, Cat_dummies_test)
+```
+
+Similarly to precedent case, we apply a forward, backward selection; a box-cox transformation for SalePrice; remove outlier. 
+The diagnostic graph of this model is shown as below:
+
+```{r}
+newfit_cat_dummy <- lm(formula= SalePrice ~., data = Cat_dummies_train)
+step_cat_dummy_fwbw <- stepAIC(newfit_cat_dummy, direction = "both")
+# summary(step_cat_dummy_fwbw)
+#plot(step_cat_dummy_fwbw)
+```
+
+
+```{r}
+# change of variable
+bc_cat_dummy <- boxcox(step_cat_dummy_fwbw, lambda = seq(-3, 3))
+best.lambda = bc_cat_dummy$x[which(bc_cat_dummy$y == max(bc_cat_dummy$y))]
+best.lambda # best.lambda = 0.03, but we take lambda = 0 for practical reasons
+fit_boxcox_cat_dummy <- lm(log(SalePrice) ~., data = step_cat_dummy_fwbw$model)
+par(mfrow= c(2,2))
+plot(fit_boxcox_cat_dummy)
+predict_bc_cat_dummy <- exp(predict(fit_boxcox_cat_dummy, new = Cat_test_dummy)) 
+rsq(predict_bc_cat_dummy, Cat_test_dummy$SalePrice)
+mse(predict_bc_cat_dummy, Cat_test_dummy$SalePrice)
+```
+
+We remark that with this dummy method, $R^2$ even increased. Which means too many variables harms the linearity. But we are glad to see that the Residual plot tends to be very good. 
+
+
+
+From the above models, we find that increase the numbers of covariables is not a garantee for improving the performance. And therefore using the one-hot variables introduces too many variable and harms the performance. To verify this idea, we will do it over all categorical variables while using a stronger covariable selection method: LASSO. The model.matrix has been used for the one-hot transformation.
+
+```{r}
+train_cat <- train_addup[, !(names(train_addup) %in% numericVarNames)]
+DFdummies <- as.data.frame(model.matrix(~.-1, train_cat))
+# DFdummies
+# so it is verified that R do the dummy transformation directly for categorical vairables.
+```
+
+
+```{r}
+library(PreProcess)
+PreAddup <- preProcess(train_addup, method=c("center", "scale"))
+```
+
+
+```{r}
+# We etract the dummy matrix for the newTraining set (one-hot variables)
+DFfactors <- train[, !(names(Newtrain) %in% numericVarNames)]
+DFfactors <- DFfactors[, names(DFfactors) != 'SalePrice']
+DFdummies <- as.data.frame(model.matrix(~.-1, DFfactors))
+
+# We prepare the test set for cross validation (we add th dummy variables)
+DFfactors_test <- test[, !(names(Newtrain) %in% numericVarNames)]
+DFfactors_test <- DFfactors_test[, names(DFfactors_test) != 'SalePrice']
+
+DFdummies_test <- as.data.frame(model.matrix(~.-1, DFfactors_test))
+test_dummy = cbind(test, DFdummies_test)
+```
+
+This has created 211 one-hot variables. 
+
+```{r}
+# Numerical variables plus one-hot categorical variables
+dummy_addup = cbind(train_numVar, DFdummies)
+```
+We will now use lasso regression to select pertinent variables. 
+The fine-tuning yield lambda to be around 1000(ranging from 700 to 1200). It is very large, which implies that a very large penalisation has been used. We will return to this point later. 
+And there are about 100 variables are selected (note that each time the result is not deterministe). 
+```{r}
+
+library(e1071)  
+
+# Normalize dummy variables
+PreAddup_dummy <- preProcess(dummy_addup, method=c("center", "scale"))
+train_without_target_dummy = subset(dummy_addup,select=-c(SalePrice))
+my_control <-trainControl(method="cv", number=2)
+# Lasso method
+lassoGrid <- expand.grid(alpha = 1, lambda = seq(0, 1500,by = 10))
+lasso_mod_dummy <- train(x=train_without_target_dummy, y=dummy_addup$SalePrice[!is.na(dummy_addup$SalePrice)], method='glmnet', trControl= my_control, tuneGrid=lassoGrid) 
+lasso_mod_dummy$bestTune # We take the best lasso_value
+min(lasso_mod_dummy$results$RMSE)
+
+lassoVarImp_dummy <- varImp(lasso_mod_dummy,scale=F)
+lassoImportance_dummy <- lassoVarImp_dummy$importance
+
+# Dummy variables selected by Lasso method
+lengthSelected_dummy <- length(which(lassoImportance_dummy$Overall!=0))
+lengthNotSelected_dummy <- length(which(lassoImportance_dummy$Overall==0))
+cat('Lasso uses', lengthSelected_dummy, 'variables in its model, and did not select', lengthNotSelected_dummy, 'variables.')
+```
+
+We will now to use the 94 variables for regression.
+
+```{r}
+#par(mfrow= c(2,2))
+#plot(lasso_mod_dummy)
+# Training set generated by considering only variables selected by Lasso method 
+train_lasso = train_without_target_dummy[which(lassoImportance_dummy$Overall!=0)] 
+```
+
+
+
+```{r}
+fit_lasso <- lm(formula = dummy_addup$SalePrice ~ ., data = train_lasso) # Linear model with train_lasso as dataset 
+# summary(fit_lasso)
+#par(mfrow= c(2,2))
+#plot(fit_lasso) 
+```
+
+Similarly to precedent, we remove the outlier and do the box-cox transformation, and we get the diagnostic graph as follows:
+
+```{r}
+# We remove the outlier once again
+dummy_addup_no_outlier = dummy_addup[-199,]
+train_lasso_no_outlier = train_lasso[-199,]
+
+# change of variable 
+bc_lasso <- boxcox(fit_lasso, lambda = seq(-3, 3))
+best.lambda = bc$x[which(bc_lasso$y == max(bc_lasso$y))]
+best.lambda # the value of best.lambda is about 0.15
+# Best BoxCox function for the linear model 
+fit_lasso_boxcox <- lm((dummy_addup_no_outlier$SalePrice^best.lambda - 1)/best.lambda ~ ., data = train_lasso_no_outlier)
+
+par(mfrow= c(2,2))
+plot(fit_lasso_boxcox)
+# Inverse the BoxCox function to reobtain the real values for the predictor 
+predictor_lasso_boxcox <- (best.lambda * predict(fit_lasso_boxcox, test_dummy) + 1) ^ (1/best.lambda) 
+
+rsq(predictor_lasso_boxcox, test_dummy$SalePrice)
+mse(predictor_lasso_boxcox, test_dummy$SalePrice)
+```
+
+We remark that after this effort, the residual distribution looks better, and so as the residual vs Leverage plot.
+
+```{r}
+# Stepforward/backward selection over the varaibles selected by Lasso 
+#step_fwbw_lasso_last <- stepAIC(fit_lasso_boxcox, direciton = "both")
+#par(mfrow= c(2,2))
+#plot(step_fwbw_lasso_last)
+#predictor_lasso_last <- (best.lambda * predict(step_fwbw_lasso_last, test_dummy) + 1) ^ (1/best.lambda)
+#rsq(predictor_lasso_last, test_dummy$SalePrice)
+#mse(predictor_lasso_last, test_dummy$SalePrice)
+```
+#4. Final Models 
+###### 
+The first model studied which took into account the numerical variables only, the Box-Cox transformation for the SalePrice (more particularly, the function $log(SalePrice)$ is taken) and StepAIC (stepforward/backward selection) for the explicative variables provides an $R^2 = 0.907$, a $MSE \sim 7e8$ and F-test = 118.7 when tested with the dataset **test**. As we stated before, these results are already good and the main advantage is that the model is rather simple. 
+
+The second one is an improvement of the previous one which consits in adding 4 categorical variables (Neighborhood, GarageType, ExterQual, RoofStyle) selected by using a Random Forest Regressor and also because those were very significative for the ANOVA summary (all had a p-value < 1e-5). The transformation for SalePrice and the StepAIC are kept for this model. In this case, we have $R^2 = 0.919$, $MSE \sim 6e8$ and F-test = 204.4 when tested with the dataset **test**. This is the model with the best performance that we have found in terms of $R^2$. 
+
+The third model is the most complex one. This time, we have taken all categorical variables into consideration, there are 240 in total (211 one-hot variables). After that, we decided to use Lasso method to select the explicative variables instead of stepforward/backward. The results were surprisingly not as good as expected and we ended up with a value of $R^2 = 0.893$, $MSE \sim 7e8$, F-test = 158.9 when tested with the dataset **test**. This results are probably due to an overfitting when selecting the variables using Lasso. 
+We finally, tried to use an stepforward/backward selection over the variables selected by Lasso in the previous model, but unfortunately the results remained the same. 
+
+#5. Discussion 
+###### 
+We have verified th hypothesis stated at the beginning of the report since the $log(SalePrice)$ can be linearly modeled by some explicative variables of the initial set. 
+
+Actually, we noticed that increasing blindly the number of explcative variables can lead to worst results even with better methods for the variable selection such as Lasso. 
+
+Some clues to improve the current models are to introduce terms of interactions, __variables croisees__ ,given that as we remarked at the begining there are several correlated variables and to mix different models for ensemble learning. 
+
